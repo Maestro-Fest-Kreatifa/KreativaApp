@@ -357,7 +357,6 @@
 <div class="drop-hint" id="dropHint"><i class="fas fa-arrow-down"></i> Lepaskan ke keranjang</div>
 <div class="toast-container" id="toastContainer"></div>
 
-<!-- Loading status saat menulis ke Sheet 2 -->
 <div class="write-status" id="writeStatus">
     <div class="ws-spinner" id="wsSpinner"></div>
     <div class="ws-text" id="wsText">Menyimpan Pesanan anda, mohon bersabar</div>
@@ -423,7 +422,7 @@ const GVIZ_URL   = 'https://docs.google.com/spreadsheets/d/' + SHEET_ID + '/gviz
 const PROXY_URL  = 'https://corsproxy.io/?' + encodeURIComponent(DIRECT_URL);
 
 // ⬇️ PASTE YOUR APPS SCRIPT WEB APP URL HERE ⬇️
-const SHEET_2_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbxVH2Na_iDDUymbp7H0FLHroqCWSctaGd6dpYSy-7zasZP8vcI_W6HnfBEh9SI_xd58/exec';
+const SHEET_2_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbymBn9986aSHYU3Y6Mk0290MbHQMFtgfRlLg5VlyAsEn7W2oDcDrkoaHukXI5AlbcWV/exec';
 
 /* ==========================================================
    CSV PARSER
@@ -475,8 +474,7 @@ async function fetchSheetData() {
 }
 
 /* ==========================================================
-   WRITE TO SHEET 2 — Format: "d1, d2, f1, f3" | Total Price
-   Dipanggil SAAT tombol "Bayar di Kasir" ditekan
+   WRITE TO SHEET 2 — dengan nomor antrian
    ========================================================== */
 function showWriteStatus(show) {
     var el = document.getElementById('writeStatus');
@@ -511,56 +509,68 @@ function writeStatusError(msg) {
 }
 
 async function writeOrderToSheet(snapshot) {
-    // Jika URL belum di-set, tampilkan pesan jelas
     if (!SHEET_2_SCRIPT_URL || SHEET_2_SCRIPT_URL.indexOf('PASTE_YOUR') !== -1) {
-        console.warn('Sheet 2 URL belum di-set.');
-        writeStatusError('URL Apps Script belum di-set di kode HTML!');
-        return false;
+        writeStatusError('URL Apps Script belum di-set!');
+        return null;
     }
 
-    // Format ID: "d1, d2, f1, f3"
     var nameList = snapshot.map(function(item) {
-    return item.name + (item.qty > 1 ? '(' + item.qty + ')' : '');
+        var prefix = item.code ? '[' + item.code + '] ' : '';
+        return prefix + item.name + (item.qty > 1 ? '(' + item.qty + ')' : '');
     }).join(', ');
 
     var totalPrice = 0;
-    snapshot.forEach(function(item) {
-        totalPrice += item.subtotal;
-    });
+    snapshot.forEach(function(item) { totalPrice += item.subtotal; });
 
     console.log('=== WRITE TO SHEET 2 ===');
-    console.log('URL:', SHEET_2_SCRIPT_URL);
     console.log('Names:', nameList);
     console.log('Total:', totalPrice);
-    console.log('=========================');   
+    console.log('=========================');
 
     showWriteStatus(true);
 
-    try {
-        // ✅ FIX: Gunakan text/plain (bukan application/json)
-        //    no-cors menghapus header non-simple, termasuk application/json
-        //    text/plain = simple header → body tetap terkirim ke server
-        var resp = await fetch(SHEET_2_SCRIPT_URL, {
-            method: 'POST',
-            mode: 'no-cors',
-            headers: { 'Content-Type': 'text/plain' },
-            body: JSON.stringify({
-                ids: nameList,
-                totalPrice: totalPrice
-            })
-        });
+    return new Promise(function(resolve, reject) {
+        var cb = 'cb_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6);
+        var url = SHEET_2_SCRIPT_URL
+            + '?ids=' + encodeURIComponent(nameList)
+            + '&totalPrice=' + totalPrice
+            + '&callback=' + cb;
 
-        // no-cors → response opaque, tidak bisa dibaca
-        // tapi jika tidak throw error = request terkirim
-        console.log('Request sent (no-cors opaque response)');
-        writeStatusDone('Dicatat ke Sheet 2 ✓');
-        return true;
+        var timeout = setTimeout(function() {
+            cleanup();
+            writeStatusError('Timeout — coba lagi');
+            resolve(null);
+        }, 10000);
 
-    } catch (err) {
-        console.error('Sheet 2 write error:', err);
-        writeStatusError('Gagal: ' + err.message);
-        return false;
-    }
+        window[cb] = function(data) {
+            clearTimeout(timeout);
+            cleanup();
+            console.log('JSONP response:', data);
+            if (data && data.success) {
+                writeStatusDone('Antrian #' + data.antrian + ' ✓');
+                resolve(data.antrian);
+            } else {
+                writeStatusError('Gagal: ' + (data && data.error ? data.error : 'Unknown'));
+                resolve(null);
+            }
+        };
+
+        var script = document.createElement('script');
+        script.src = url;
+        script.onerror = function() {
+            clearTimeout(timeout);
+            cleanup();
+            console.error('JSONP script failed to load');
+            writeStatusError('Gagal memuat — coba lagi');
+            resolve(null);
+        };
+        document.head.appendChild(script);
+
+        function cleanup() {
+            delete window[cb];
+            if (script.parentNode) script.parentNode.removeChild(script);
+        }
+    });
 }
 
 /* ==========================================================
@@ -602,12 +612,13 @@ async function startApp() {
         var nameIdx  = findCol(['name', 'nama', 'produk']);
         var priceIdx = findCol(['price', 'harga']);
         var descIdx  = findCol(['desc', 'deskripsi', 'keterangan', 'ket']);
+        var codeIdx  = findCol(['code', 'kode', 'kod']);
         var imgIdx   = findCol(['img', 'image', 'gambar', 'foto', 'url']);
 
-        debugInfo += 'Mapped: type=' + typeIdx + ' id=' + idIdx + ' name=' + nameIdx + ' price=' + priceIdx + ' desc=' + descIdx + ' img=' + imgIdx + '\n';
+                debugInfo += 'Mapped: type=' + typeIdx + ' id=' + idIdx + ' name=' + nameIdx + ' price=' + priceIdx + ' desc=' + descIdx + ' code=' + codeIdx + ' img=' + imgIdx + '\n';
 
         if (idIdx === -1 || nameIdx === -1 || priceIdx === -1) {
-            throw { message: 'Kolom tidak ditemukan.<br>Header: <strong>[' + headers.join(', ') + ']</strong><br>Butuhkan kolom: <strong>id/tipe, nama/name/produk, harga/price</strong>', debug: debugInfo };
+            throw { message: 'Kolom tidak ditemukan.<br>Header: <strong>[' + headers.join(', ') + ']</strong><br>Butuhkan: <strong>id, nama/name, harga/price</strong>', debug: debugInfo };
         }
 
         var drinks = [], foods = [];
@@ -620,6 +631,7 @@ async function startApp() {
                 name: String(row[nameIdx]),
                 price: parseInt(rawPrice) || 0,
                 desc: descIdx !== -1 ? String(row[descIdx]) : '',
+                code: codeIdx !== -1 ? String(row[codeIdx]) : '',
                 img: imgIdx !== -1 ? String(row[imgIdx]) : ''
             };
             var type = typeIdx !== -1 ? String(row[typeIdx]).toLowerCase().trim() : '';
@@ -644,7 +656,7 @@ async function startApp() {
 }
 
 /* ==========================================================
-   CART, SWIPE, DRAG, CHECKOUT, PAYMENT
+   CART, SWIPE, DRAG
    ========================================================== */
 const cart={};const slideState={drink:0,food:0};let visibleCards=4,prevTotal=0;let isDragging=false,dragData=null,ghostEl=null;let dragStartX=0,dragStartY=0,lastTrailTime=0;const DRAG_THRESHOLD=10;
 let checkoutSnapshot=null;
@@ -653,7 +665,6 @@ function formatRp(n){return'Rp '+n.toLocaleString('id-ID')}
 function isMobile(){return window.innerWidth<768}
 function getStep(){return(getCSSVar('--card-w')||180)+(getCSSVar('--card-gap')||16)}
 function getCSSVar(n){return parseInt(getComputedStyle(document.documentElement).getPropertyValue(n))||0}
-function findItemData(id){return drinkItems.find(i=>i.id===id)||foodItems.find(i=>i.id===id)}
 
 function buildSections(cid){
     const c=document.getElementById(cid);
@@ -711,8 +722,13 @@ document.addEventListener('touchstart',onDragStart,{passive:false});document.add
 document.addEventListener('touchcancel',()=>{if(isDragging)cancelDrop();if(dragData)['desktopSections','androidSections'].forEach(c=>{const card=document.getElementById(c+'-card-'+dragData.id);if(card)card.classList.remove('drag-active')});removeGhost();hideDropHint();if(isMobile())document.getElementById('androidBar').classList.remove('cart-highlight');else document.getElementById('sidebarEl').classList.remove('cart-highlight');isDragging=false;dragData=null});
 document.addEventListener('mousedown',onDragStart);document.addEventListener('mousemove',onDragMove);document.addEventListener('mouseup',onDragEnd);
 
+function findItemData(id){return drinkItems.find(i=>i.id===id)||foodItems.find(i=>i.id===id)}
+
 function addToCart(id,name,price,type,fromFly){
-    if(cart[id])cart[id].qty++;else cart[id]={name,price,qty:1,type};
+    var itemData=findItemData(id);
+    var desc=itemData?itemData.desc:'';
+    var code=itemData?itemData.code:'';
+    if(cart[id])cart[id].qty++;else cart[id]={name,price,qty:1,type,desc,code};
     if(!fromFly){['desktopSections','androidSections'].forEach(cid=>{const b=document.getElementById(cid+'-btn-'+id);if(b){b.classList.add('added');b.innerHTML='<i class="fas fa-check"></i> Ditambahkan';setTimeout(()=>{b.classList.remove('added');b.innerHTML='<i class="fas fa-plus"></i> Tambah'},400)}})}
     recalculate(id);showToast(name+' ditambahkan');
 }
@@ -761,8 +777,7 @@ document.addEventListener('touchmove',e=>{if(!sheetDrag||!sheetOpen)return;const
 document.addEventListener('touchend',e=>{if(!sheetDrag)return;sheetDrag=false;const dy=e.changedTouches[0].clientY-sheetStartY;const s=document.getElementById('bottomSheet');s.style.transition='';s.style.transform='';if(dy>80)closeSheet();else if(sheetOpen)document.getElementById('bottomSheet').classList.add('open')});
 
 /* ==========================================================
-   CHECKOUT — simpan snapshot, clear cart, tampilkan halaman bayar
-   (TIDAK menulis ke Sheet 2 di sini — ditulis saat "Bayar di Kasir")
+   CHECKOUT
    ========================================================== */
 function doCheckout(){
     closeSheet();
@@ -775,19 +790,18 @@ function doCheckout(){
         const it=cart[id];
         const sub=it.price*it.qty;
         grandTotal+=sub;
-        checkoutSnapshot.push({
+            checkoutSnapshot.push({
             type: it.type,
-            id: id,         
+            id: id,
             name: it.name,
+            desc: it.desc,
+            code: it.code,
             unitPrice: it.price,
             qty: it.qty,
             subtotal: sub
         });
     });
 
-    // ... sisanya tetap sama ...
-
-    // Clear cart & tampilkan halaman payment
     Object.keys(cart).forEach(k=>delete cart[k]);
     recalculate();
 
@@ -806,41 +820,46 @@ function doCheckout(){
 }
 
 function closePayment(){
-    var btn = document.getElementById('btnBayarKasir');
-    btn.disabled = false;
-    btn.style.opacity = '1';
-    btn.style.pointerEvents = 'auto';
-
+    var btn=document.getElementById('btnBayarKasir');
+    btn.disabled=false;
+    btn.style.opacity='1';
+    btn.style.pointerEvents='auto';
     const overlay=document.getElementById('paymentOverlay');
     overlay.classList.remove('show');
     setTimeout(()=>{overlay.style.display='none'},350);
     checkoutSnapshot=null;
 }
+
 /* ==========================================================
-   BAYAR DI KASIR — Tulis ke Sheet 2, lalu tampilkan sukses
-   Format yang dikirim: { ids: "d1, d2, f1, f3", totalPrice: 50000 }
+   BAYAR DI KASIR — Tulis ke Sheet 2 + nomor antrian
    ========================================================== */
 async function confirmPayment(method) {
     if (!checkoutSnapshot) return;
 
-    // Disable tombol supaya tidak double-click
     var btn = document.getElementById('btnBayarKasir');
     btn.disabled = true;
     btn.style.opacity = '0.6';
     btn.style.pointerEvents = 'none';
 
-    // Log data yang akan dikirim (buka Console di browser untuk lihat)
-    var nameList = checkoutSnapshot.map(function(i) {return i.name + (i.qty > 1 ? '(' + i.qty + ')' : '');}).join(', ');
+    var nameList = checkoutSnapshot.map(function(i) {
+        var prefix = i.code ? '[' + i.code + '] ' : '';
+        return prefix + i.name + (i.qty > 1 ? '(' + i.qty + ')' : '');
+    }).join(', ');
     var total = 0;
     checkoutSnapshot.forEach(function(i) { total += i.subtotal; });
-    console.log('%c[BAYAR DI KASIR] Items: "' + nameList + '" | Total: ' + total, 'color: #f16f8b; font-weight: bold; font-size: 14px');
+    console.log('%c[BAYAR DI KASIR] Items: "' + nameList + '" | Total: ' + total, 'color:#f16f8b;font-weight:bold;font-size:14px');
 
-    // ✅ TULIS KE SHEET 2
-    await writeOrderToSheet(checkoutSnapshot);
+    var antrian = await writeOrderToSheet(checkoutSnapshot);
 
-    // Tampilkan modal sukses
-    document.getElementById('successMsg').textContent = 'Pembayaran di Kasir berhasil! Terima kasih sudah berbelanja.';
-    document.getElementById('successDetail').style.display = 'none';
+    if (antrian) {
+        document.getElementById('successMsg').textContent = 'Pembayaran di Kasir berhasil!';
+        document.getElementById('successDetail').style.display = 'block';
+        document.getElementById('successDetail').innerHTML = 'Nomor Antrian: <span>#' + antrian + '</span>';
+    } else {
+        document.getElementById('successMsg').textContent = 'Pembayaran berhasil, tapi nomor antrian gagal dimuat.';
+        document.getElementById('successDetail').style.display = 'none';
+    }
+
     document.getElementById('successModal').classList.add('show');
 }
 
