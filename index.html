@@ -805,8 +805,17 @@ function doCheckout(){
     const overlay=document.getElementById('paymentOverlay');overlay.style.display='block';void overlay.offsetWidth;overlay.classList.add('show');overlay.scrollTop=0;
 }
 
-function closePayment(){const overlay=document.getElementById('paymentOverlay');overlay.classList.remove('show');setTimeout(()=>{overlay.style.display='none'},350);checkoutSnapshot=null}
+function closePayment(){
+    var btn = document.getElementById('btnBayarKasir');
+    btn.disabled = false;
+    btn.style.opacity = '1';
+    btn.style.pointerEvents = 'auto';
 
+    const overlay=document.getElementById('paymentOverlay');
+    overlay.classList.remove('show');
+    setTimeout(()=>{overlay.style.display='none'},350);
+    checkoutSnapshot=null;
+}
 /* ==========================================================
    BAYAR DI KASIR — Tulis ke Sheet 2, lalu tampilkan sukses
    Format yang dikirim: { ids: "d1, d2, f1, f3", totalPrice: 50000 }
